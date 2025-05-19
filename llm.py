@@ -10,7 +10,7 @@ class TherapistLLM:
         self.TINYLLAMA_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
         self.EMBEDDING_MODEL = "all-MiniLM-L6-v2"
         self.FAISS_DIM = 384
-        self.NUM_RETRIEVED_MEMORIES = 3
+        self.NUM_RETRIEVED_MEMORIES = 5
         self.MEMORY_CHUNK_SIZE = 2
         self.MAX_NEW_TOKENS = 256
 
@@ -29,13 +29,6 @@ class TherapistLLM:
             print("Please ensure you have the required dependencies and potentially enough VRAM.")
             raise
 
-        # We use IndexFlatL2 which is a simple L2 distance index
-        self.index = faiss.IndexFlatL2(self.FAISS_DIM)
-        print(f"FAISS index initialized with dimension {self.FAISS_DIM}.")
-
-        # List to store the actual text of the memories, corresponding to the vectors in FAISS
-        self.memory_texts = []
-
         # Initialize the embedding model
         print(f"Loading embedding model: {self.EMBEDDING_MODEL}...")
         try:
@@ -45,6 +38,13 @@ class TherapistLLM:
             print(f"Error loading embedding model: {e}")
             print("Please ensure you have internet access to download the model.")
             raise
+
+        # We use IndexFlatL2 which is a simple L2 distance index
+        self.index = faiss.IndexFlatIP(self.FAISS_DIM) # Changed to IndexFlatIP for Cosine Similarity
+        print(f"FAISS index initialized with dimension {self.FAISS_DIM}.")
+
+        # List to store the actual text of the memories, corresponding to the vectors in FAISS
+        self.memory_texts = []
 
         # Manage chat history as a list of messages
         # Keep the system message and few-shot examples as initial history
@@ -113,8 +113,14 @@ class TherapistLLM:
         # Encode the text
         # Convert to numpy array and ensure float32 dtype for FAISS
         vector = self.embedding_model.encode(text).astype('float32')
+
         # FAISS add expects a 2D array (batch_size, dimension)
+        # --- FIX: Expand dims *before* normalizing ---
         vector = np.expand_dims(vector, axis=0)
+
+        # L2 Normalize vector for Cosine Similarity
+        faiss.normalize_L2(vector)
+        # --- END FIX ---
 
         # Add to FAISS index
         self.index.add(vector)
@@ -132,8 +138,14 @@ class TherapistLLM:
 
         # Encode the query text
         query_vector = self.embedding_model.encode(query_text).astype('float32')
+
         # FAISS search expects a 2D array
+        # --- FIX: Expand dims *before* normalizing ---
         query_vector = np.expand_dims(query_vector, axis=0)
+
+        # L2 Normalize query vector for Cosine Similarity
+        faiss.normalize_L2(query_vector)
+        # --- END FIX ---
 
         # Search the index
         # D is distances, I is indices of the nearest neighbors
@@ -168,7 +180,7 @@ class TherapistLLM:
             prompt += "--- Relevant Past Memories for Context ---\n"
             for i, memory in enumerate(retrieved_memories):
                  prompt += f"- {memory}\n"
-            prompt += "-------------------------------------------\n\n" # Added extra newline for separation
+            prompt += "-------------------------------------------\n\n"
 
 
         # Add recent chat history (excluding the initial system message)
@@ -214,7 +226,6 @@ class TherapistLLM:
 
         cleaned_reply = cleaned_reply.rstrip('\n')
 
-        # Add specific cleaning for the memory markers
         memory_end_marker_old = "--- End of Memories ---"
         memory_end_marker_new = "-------------------------------------------"
 
@@ -264,7 +275,6 @@ class TherapistLLM:
                 new_memory_text = f"User: {latest_user_turn}\nAssistant: {latest_assistant_turn}"
                 self.add_memory(new_memory_text)
         else:
-            # If reply was empty/error, remove the user message added just before
             if self.chat_history and self.chat_history[-1]["role"] == "user":
                  self.chat_history.pop()
             print(f"Warning: Skipping adding empty or error reply to history/memory for input: {user_input}")
